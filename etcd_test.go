@@ -25,6 +25,8 @@ func TestEtcdWal(t *testing.T) {
 	require.Nil(t, err)
 	require.Nil(t, w.Close())
 
+	// ---------- reopen ----------
+
 	// WALファイルを開く
 	w, err = wal.Open(logger, dataPath, walpb.Snapshot{})
 	require.Nil(t, err)
@@ -90,6 +92,8 @@ func TestEtcdWal(t *testing.T) {
 	}
 	require.Nil(t, w.Close())
 
+	// ---------- reopen ----------
+
 	// ReadAllを呼ぶために開き直す
 	w, err = wal.Open(logger, dataPath, walpb.Snapshot{})
 	require.Nil(t, err)
@@ -123,11 +127,13 @@ func TestEtcdWal(t *testing.T) {
 	}
 	require.Nil(t, w.Close())
 
-	// ReadAllの内容はファイルを開き直しても変化しない
-	// 1度のOpenで複数回呼べないけどMQみたいにConsumeで消えるわけでは無さそう
+	// ---------- reopen ----------
+
 	w, err = wal.Open(logger, dataPath, walpb.Snapshot{})
 	require.Nil(t, err)
 	{
+		// ReadAllの内容はファイルを開き直しても変化しない
+		// 1度のOpenで複数回呼べないけどMQみたいにConsumeで消えるわけでは無さそう
 		meta, state, ent, err := w.ReadAll()
 		require.Nil(t, err)
 		assert.Equal(t, raftpb.HardState{
@@ -136,6 +142,70 @@ func TestEtcdWal(t *testing.T) {
 			Commit: 200,
 		}, state)
 		assert.Len(t, ent, 3)
+		t.Logf("meta %v state %v ent %v", meta, state, ent)
+	}
+	{
+		// スナップショットを保存した上で、エントリを追加
+		err := w.SaveSnapshot(walpb.Snapshot{
+			Term:      0,
+			Index:     3,
+			ConfState: &raftpb.ConfState{},
+		})
+		require.Nil(t, err)
+
+		st := raftpb.HardState{
+			Term:   0,
+			Vote:   300,
+			Commit: 200,
+		}
+		ents := []raftpb.Entry{
+			{
+				Term:  0,
+				Index: 4,
+				Data:  []byte{4},
+			},
+		}
+		err = w.Save(st, ents)
+		require.Nil(t, err)
+	}
+	require.Nil(t, w.Close())
+
+	// ---------- reopen ----------
+
+	// WALを開く前にSnapshotの一覧を取得できる
+	snapshots, err := wal.ValidSnapshotEntries(logger, dataPath)
+	require.Nil(t, err)
+	assert.Equal(t, []walpb.Snapshot{
+		{
+			Term:      0,
+			Index:     0,
+			ConfState: nil,
+		},
+		{
+			Term:      0,
+			Index:     3,
+			ConfState: &raftpb.ConfState{},
+		},
+	}, snapshots)
+
+	w, err = wal.Open(logger, dataPath, snapshots[1]) // 最新のスナップショットで開き直す
+	require.Nil(t, err)
+	{
+		// Snapshotを指定してWALを開いたので、スナップショット以降に記録されたファイルのみが読み出される
+		meta, state, ent, err := w.ReadAll()
+		require.Nil(t, err)
+		assert.Equal(t, raftpb.HardState{
+			Term:   0,
+			Vote:   300,
+			Commit: 200,
+		}, state)
+		assert.Equal(t, ent, []raftpb.Entry{
+			{
+				Term:  0,
+				Index: 4,
+				Data:  []byte{4},
+			},
+		})
 		t.Logf("meta %v state %v ent %v", meta, state, ent)
 	}
 	require.Nil(t, w.Close())
